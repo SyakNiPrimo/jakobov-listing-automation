@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=Montserrat:wght@300;400;500;600&display=swap');
+
+:root {
+  --navy: #1C1C2E;
+  --gold: #C9A96E;
+  --purple: #2E1A47;
+  --cream: #F5F0E8;
+  --gray: #9A9080;
+  --white: #FFFFFF;
+}
+
+body {
+  background-color: var(--navy);
+  color: var(--cream);
+  font-family: 'Montserrat', sans-serif;
+}
+
+.font-headline {
+  font-family: 'Playfair Display', serif;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
