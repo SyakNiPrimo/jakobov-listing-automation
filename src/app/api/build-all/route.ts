@@ -4,8 +4,8 @@ import { Listing } from '@/types'
 
 export async function POST() {
   try {
-    const { data } = await db.from('listings').select('id').eq('build_status', 'ready').get()
-    const listings = data as Pick<Listing, 'id'>[]
+    const { data } = await db.database.from('listings').select('id').eq('build_status', 'ready')
+    const listings = (data ?? []) as Pick<Listing, 'id'>[]
 
     const results = []
     for (const l of listings) {

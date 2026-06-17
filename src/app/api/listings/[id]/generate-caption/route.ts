@@ -5,12 +5,12 @@ import { Agent, Listing } from '@/types'
 
 export async function POST(_req: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const { data: rows } = await db.from('listings').select('*').eq('id', params.id).get()
-    const listing = (rows as Listing[])[0]
+    const { data: listingData } = await db.database.from('listings').select('*').eq('id', params.id).maybeSingle()
+    const listing = listingData as Listing | null
     if (!listing) return NextResponse.json({ error: 'Listing not found' }, { status: 404 })
 
-    const { data: agentRows } = await db.from('agents').select('*').eq('name', listing.agent_name).get()
-    const agent = (agentRows as Agent[])[0]
+    const { data: agentData } = await db.database.from('agents').select('*').eq('name', listing.agent_name).maybeSingle()
+    const agent = agentData as Agent | null
 
     const caption = await generateCaption({
       address: listing.address,
@@ -27,10 +27,7 @@ export async function POST(_req: NextRequest, { params }: { params: { id: string
       mls_description: listing.mls_description,
     })
 
-    await db.from('listings').eq('id', params.id).update({
-      generated_caption: caption,
-      updated_at: new Date().toISOString(),
-    })
+    await db.database.from('listings').update({ generated_caption: caption }).eq('id', params.id)
 
     return NextResponse.json({ ok: true, caption })
   } catch (err) {

@@ -12,6 +12,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.2",
     "@auth/core": "^0.34.3",
+    "@insforge/sdk": "^1.4.2",
     "@types/cheerio": "^0.22.35",
     "@types/uuid": "^10.0.0",
     "cheerio": "^1.2.0",

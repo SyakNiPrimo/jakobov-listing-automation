@@ -22,7 +22,6 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       const inputBuffer = Buffer.from(arrayBuffer)
       processedBuffer = await applyBlurFill(inputBuffer)
 
-      // Store via InsForge storage (presigned upload)
       const uploadRes = await fetch(`${process.env.INSFORGE_API_URL}/storage/upload`, {
         method: 'POST',
         headers: {
@@ -43,7 +42,6 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       processedBuffer = await applyBlurFill(buf)
     }
 
-    // Upload processed image
     const processedRes = await fetch(`${process.env.INSFORGE_API_URL}/storage/upload`, {
       method: 'POST',
       headers: {
@@ -56,30 +54,26 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     const processedData = await processedRes.json()
     const processedUrl = processedData.url || ''
 
-    // Upsert listing_photos row
-    const { data: existing } = await db
+    const { data: existing } = await db.database
       .from('listing_photos')
       .select('id')
       .eq('listing_id', params.id)
       .eq('slot', slot)
-      .get()
+      .maybeSingle()
 
-    const existingRow = (existing as { id: string }[])[0]
-
-    if (existingRow) {
-      await db.from('listing_photos').eq('id', existingRow.id).update({
+    if (existing) {
+      await db.database.from('listing_photos').update({
         original_url: originalUrl,
         processed_url: processedUrl,
-      })
+      }).eq('id', (existing as { id: string }).id)
     } else {
-      await db.from('listing_photos').insert({
+      await db.database.from('listing_photos').insert([{
         id: uuidv4(),
         listing_id: params.id,
         slot,
         original_url: originalUrl,
         processed_url: processedUrl,
-        created_at: new Date().toISOString(),
-      })
+      }])
     }
 
     return NextResponse.json({ ok: true, original_url: originalUrl, processed_url: processedUrl })
@@ -90,11 +84,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
 
 export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const { data, error } = await db
-      .from('listing_photos')
-      .select('*')
-      .eq('listing_id', params.id)
-      .get()
+    const { data, error } = await db.database.from('listing_photos').select('*').eq('listing_id', params.id)
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
     return NextResponse.json(data)
   } catch (err) {

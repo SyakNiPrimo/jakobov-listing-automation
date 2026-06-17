@@ -3,11 +3,10 @@ import { db } from '@/lib/insforge'
 
 export async function POST(_req: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const { error } = await db.from('listings').eq('id', params.id).update({
+    const { error } = await db.database.from('listings').update({
       build_status: 'posted',
       posted_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    })
+    }).eq('id', params.id)
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
     return NextResponse.json({ ok: true })
   } catch (err) {

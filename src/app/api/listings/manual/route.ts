@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
     const luxuryThreshold = parseInt(process.env.LUXURY_PRICE_THRESHOLD || '1000000', 10)
     const id = uuidv4()
 
-    await db.from('listings').insert({
+    const { error } = await db.database.from('listings').insert([{
       id,
       mls_number: null,
       source: 'manual',
@@ -48,10 +48,9 @@ export async function POST(req: NextRequest) {
       mls_description: d.mls_description ?? null,
       is_luxury: (d.price ?? 0) >= luxuryThreshold,
       build_status: 'ready',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    })
+    }])
 
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
     return NextResponse.json({ ok: true, id })
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 })

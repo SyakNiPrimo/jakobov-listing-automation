@@ -8,15 +8,12 @@ export async function GET(req: NextRequest) {
     const status = searchParams.get('status') as ListingStatus | null
     const buildStatus = searchParams.get('build_status') as BuildStatus | null
 
-    let query = db.from('listings').select('*').order('created_at', { ascending: false })
-
-    // Note: InsForge QueryBuilder chains return `this` so filters stack
+    let query = db.database.from('listings').select('*').order('created_at', { ascending: false })
     if (status) query = query.eq('status', status)
     if (buildStatus) query = query.eq('build_status', buildStatus)
 
-    const { data, error } = await query.get()
+    const { data, error } = await query
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-
     return NextResponse.json(data)
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 })
