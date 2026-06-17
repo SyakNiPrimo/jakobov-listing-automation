@@ -24,6 +24,8 @@ export default function ListingDetail() {
   const [building, setBuilding] = useState(false)
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null)
   const [uploadingSlot, setUploadingSlot] = useState<PhotoSlot | null>(null)
+  const [details, setDetails] = useState({ bedrooms: '', bathrooms: '', sqft_or_acreage: '' })
+  const [savingDetails, setSavingDetails] = useState(false)
 
   const showToast = (msg: string, ok = true) => {
     setToast({ msg, ok })
@@ -39,6 +41,11 @@ export default function ListingDetail() {
       const l: Listing = await lRes.json()
       setListing(l)
       if (l.generated_caption && !captionEdited) setCaption(l.generated_caption)
+      setDetails({
+        bedrooms: l.bedrooms != null ? String(l.bedrooms) : '',
+        bathrooms: l.bathrooms != null ? String(l.bathrooms) : '',
+        sqft_or_acreage: l.sqft_or_acreage ?? '',
+      })
     }
     if (pRes.ok) setPhotos(await pRes.json())
   }, [id, captionEdited])
@@ -74,6 +81,22 @@ export default function ListingDetail() {
     } else {
       showToast(`Build failed: ${data.error}`, false)
     }
+  }
+
+  const handleSaveDetails = async () => {
+    setSavingDetails(true)
+    const res = await fetch(`/api/listings/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bedrooms: details.bedrooms !== '' ? Number(details.bedrooms) : null,
+        bathrooms: details.bathrooms !== '' ? Number(details.bathrooms) : null,
+        sqft_or_acreage: details.sqft_or_acreage || null,
+      }),
+    })
+    setSavingDetails(false)
+    if (res.ok) { showToast('Details saved'); fetchData() }
+    else showToast('Save failed', false)
   }
 
   const handleMarkPosted = async () => {
@@ -191,9 +214,6 @@ export default function ListingDetail() {
           { label: 'Agent', value: listing.agent_name },
           { label: 'Price', value: listing.price ? `$${listing.price.toLocaleString()}` : '—' },
           { label: 'MLS #', value: listing.mls_number ? `#${listing.mls_number}` : 'Manual entry' },
-          { label: 'Bedrooms', value: listing.bedrooms ?? '—' },
-          { label: 'Bathrooms', value: listing.bathrooms ?? '—' },
-          { label: 'Size', value: listing.sqft_or_acreage || '—' },
           { label: 'Source', value: listing.source },
           { label: 'Build Status', value: listing.build_status },
           { label: 'Received', value: listing.email_received_at ? new Date(listing.email_received_at).toLocaleDateString() : '—' },
@@ -203,6 +223,40 @@ export default function ListingDetail() {
             <div style={{ color: 'var(--cream)' }}>{String(item.value)}</div>
           </div>
         ))}
+      </div>
+
+      {/* Editable bed/bath/sqft */}
+      <div className="rounded-lg p-5 space-y-4" style={{ background: 'rgba(46,26,71,0.4)', border: '1px solid rgba(201,169,110,0.15)' }}>
+        <div className="flex items-center justify-between">
+          <h2 className="font-headline text-xl" style={{ color: 'var(--gold)' }}>Property Details</h2>
+          <button
+            onClick={handleSaveDetails}
+            disabled={savingDetails}
+            className="px-4 py-2 rounded text-sm font-medium disabled:opacity-50"
+            style={{ background: 'var(--purple)', color: 'var(--gold)', border: '1px solid rgba(201,169,110,0.3)' }}
+          >
+            {savingDetails ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+        <div className="grid grid-cols-3 gap-4">
+          {[
+            { key: 'bedrooms', label: 'Bedrooms', placeholder: 'e.g. 4', type: 'number' },
+            { key: 'bathrooms', label: 'Bathrooms', placeholder: 'e.g. 2.5', type: 'number' },
+            { key: 'sqft_or_acreage', label: 'Size', placeholder: 'e.g. 2,100 sq ft', type: 'text' },
+          ].map(({ key, label, placeholder, type }) => (
+            <div key={key}>
+              <label className="text-xs uppercase tracking-wider block mb-1" style={{ color: 'var(--gray)' }}>{label}</label>
+              <input
+                type={type}
+                step={key === 'bathrooms' ? '0.5' : '1'}
+                value={details[key as keyof typeof details]}
+                onChange={e => setDetails(d => ({ ...d, [key]: e.target.value }))}
+                placeholder={placeholder}
+                style={{ ...inputStyle, width: '100%' }}
+              />
+            </div>
+          ))}
+        </div>
       </div>
 
       {/* Caption Generator */}

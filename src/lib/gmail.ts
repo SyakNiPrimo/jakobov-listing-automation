@@ -38,6 +38,9 @@ export interface ParsedListing {
   zip: string | null
   agent_name: string | null
   photo_url: string | null
+  bedrooms: number | null
+  bathrooms: number | null
+  sqft_or_acreage: string | null
   email_received_at: Date
 }
 
@@ -56,16 +59,25 @@ function matchAgentInText(text: string, agentNames: string[]): string | null {
   return null
 }
 
-async function fetchHiResPhotoFromListingPage(url: string): Promise<string | null> {
+interface ListingPageDetails {
+  photo_url: string | null
+  bedrooms: number | null
+  bathrooms: number | null
+  sqft_or_acreage: string | null
+}
+
+async function fetchListingPageDetails(url: string): Promise<ListingPageDetails> {
+  const empty: ListingPageDetails = { photo_url: null, bedrooms: null, bathrooms: null, sqft_or_acreage: null }
   try {
     const res = await fetch(url, {
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(12000),
       headers: { 'User-Agent': 'Mozilla/5.0' },
     })
-    if (!res.ok) return null
+    if (!res.ok) return empty
     const html = await res.text()
     const $ = cheerio.load(html)
 
+    // ── Photo ──────────────────────────────────────────────────────────────
     let photo_url: string | null = null
     $('img').each((_, el) => {
       if (photo_url) return
@@ -81,9 +93,52 @@ async function fetchHiResPhotoFromListingPage(url: string): Promise<string | nul
         }
       })
     }
-    return photo_url
+
+    // ── Bed / Bath / Sqft — scan full page text for labeled values ─────────
+    // Flexmls pages render these as labelled pairs in tables or definition lists.
+    // We search the full text for patterns like "3 Beds", "2 Baths", "1,850 Sq Ft".
+    const pageText = $('body').text().replace(/\s+/g, ' ')
+
+    let bedrooms: number | null = null
+    let bathrooms: number | null = null
+    let sqft_or_acreage: string | null = null
+
+    // Bedrooms: "3 Bed", "3 Beds", "3 Bedroom", "Beds: 3", "Bedrooms 3"
+    const bedMatch = pageText.match(/(\d+)\s*(?:Bed(?:room)?s?)\b/i)
+      ?? pageText.match(/\bBed(?:room)?s?\s*[:\-]?\s*(\d+)/i)
+    if (bedMatch) {
+      const n = parseInt(bedMatch[1] ?? bedMatch[2] ?? '', 10)
+      if (!isNaN(n) && n > 0 && n < 30) bedrooms = n
+    }
+
+    // Bathrooms: "2 Bath", "2 Baths", "2.5 Baths", "Baths: 2"
+    const bathMatch = pageText.match(/(\d+(?:\.\d+)?)\s*(?:Bath(?:room)?s?)\b/i)
+      ?? pageText.match(/\bBath(?:room)?s?\s*[:\-]?\s*(\d+(?:\.\d+)?)/i)
+    if (bathMatch) {
+      const n = parseFloat(bathMatch[1] ?? bathMatch[2] ?? '')
+      if (!isNaN(n) && n > 0 && n < 20) bathrooms = n
+    }
+
+    // Sqft: "1,850 Sq Ft", "1850 SqFt", "1,850 Square Feet"
+    const sqftMatch = pageText.match(/([\d,]+)\s*(?:sq\.?\s*ft\.?|square\s*feet)/i)
+    if (sqftMatch) {
+      const val = sqftMatch[1].replace(/,/g, '')
+      const n = parseInt(val, 10)
+      if (!isNaN(n) && n > 100 && n < 50000) sqft_or_acreage = `${n.toLocaleString()} sq ft`
+    }
+
+    // Acreage fallback: "2.5 Acres", "0.75 Acre"
+    if (!sqft_or_acreage) {
+      const acreMatch = pageText.match(/([\d.]+)\s*Acres?/i)
+      if (acreMatch) {
+        const n = parseFloat(acreMatch[1])
+        if (!isNaN(n) && n > 0 && n < 10000) sqft_or_acreage = `${n} acres`
+      }
+    }
+
+    return { photo_url, bedrooms, bathrooms, sqft_or_acreage }
   } catch {
-    return null
+    return empty
   }
 }
 
@@ -243,8 +298,9 @@ async function parseEmail(
     // override the correct agent name derived from the email subject.
     const agent_name: string | null = matchAgentInText(subject, agentNames)
 
-    // ── Hi-res photo — from listing page ──────────────────────────────────
-    const hiResPhoto: string | null = (await fetchHiResPhotoFromListingPage(viewUrl)) ?? photo_url
+    // ── Listing page: hi-res photo + bed/bath/sqft in one fetch ───────────
+    const pageDetails = await fetchListingPageDetails(viewUrl)
+    const hiResPhoto = pageDetails.photo_url ?? photo_url
 
     results.push({
       mls_number,
@@ -256,6 +312,9 @@ async function parseEmail(
       zip,
       agent_name,
       photo_url: hiResPhoto,
+      bedrooms: pageDetails.bedrooms,
+      bathrooms: pageDetails.bathrooms,
+      sqft_or_acreage: pageDetails.sqft_or_acreage,
       email_received_at: receivedAt,
     })
   }
