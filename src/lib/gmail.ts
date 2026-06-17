@@ -306,7 +306,7 @@ export async function scanGmailInbox(agentNames: string[]): Promise<ParsedListin
 
   const listRes = await gmail.users.messages.list({
     userId: 'me',
-    q: `from:${SENDER}`,
+    q: `from:${SENDER} after:2026/06/01 before:2026/07/01`,
     maxResults: 500,
   })
 
