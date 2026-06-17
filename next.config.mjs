@@ -5,6 +5,7 @@ const nextConfig = {
       { protocol: 'https', hostname: 'cdn.photos.sparkplatform.com' },
       { protocol: 'https', hostname: '**.canva.com' },
       { protocol: 'https', hostname: '**.insforge.io' },
+      { protocol: 'https', hostname: '**.insforge.app' },
       { protocol: 'https', hostname: '**.vercel-storage.com' },
     ],
   },

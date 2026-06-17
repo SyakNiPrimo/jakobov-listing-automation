@@ -1,7 +1,7 @@
-import Anthropic from '@anthropic-ai/sdk'
+import Groq from 'groq-sdk'
 import { DealSide, ListingStatus } from '@/types'
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+const client = new Groq({ apiKey: process.env.GROQ_API_KEY })
 
 interface CaptionInput {
   address: string
@@ -30,12 +30,8 @@ function openerLine(status: ListingStatus, city: string): string {
 
 function creditLine(deal_side: DealSide, status: ListingStatus, agent_instagram: string | null): string {
   const handle = agent_instagram ? `@${agent_instagram.replace(/^@/, '')}` : '@thejakobovgroup'
-  if (deal_side === 'buyer') {
-    return `Buyer represented by: ${handle} + @thejakobovgroup`
-  }
-  if (status === 'Closed') {
-    return `Sold by: ${handle} + @thejakobovgroup`
-  }
+  if (deal_side === 'buyer') return `Buyer represented by: ${handle} + @thejakobovgroup`
+  if (status === 'Closed') return `Sold by: ${handle} + @thejakobovgroup`
   return `Listed by: ${handle} + @thejakobovgroup`
 }
 
@@ -61,9 +57,9 @@ export async function generateCaption(input: CaptionInput): Promise<string> {
   const prompt = `You are a copywriter for The Jakobov Group, a luxury real estate team in Arizona. Write an Instagram caption for a property.
 
 Style rules:
-- Two original paragraphs informed by the MLS description's facts. Do NOT closely mirror the MLS description's sentence structure or copy phrases verbatim. Write fresh, editorial copy.
-- Do NOT use em dashes or hyphens anywhere in the caption. Use semicolons, periods, or "and" instead when joining clauses.
-- Tone: premium, editorial, minimal. Not generic SaaS marketing copy.
+- Write two original paragraphs informed by the MLS description's facts. Do NOT mirror the MLS description's sentence structure or copy phrases verbatim. Write fresh, editorial copy.
+- Do NOT use em dashes or hyphens anywhere in the caption. Use semicolons, periods, or "and" instead.
+- Tone: premium, editorial, minimal. Not generic marketing copy.
 - Do not use exclamation points.
 
 Property details:
@@ -78,15 +74,15 @@ Property details:
 - Price: ${priceStr}
 - MLS Description: ${mls_description || 'Not provided'}
 
-Output ONLY the two descriptive paragraphs (no opener, no hashtags, no credit line, no labels). Paragraphs should be separated by a blank line.`
+Output ONLY the two descriptive paragraphs separated by a blank line. No opener, no hashtags, no credit line, no labels.`
 
-  const msg = await client.messages.create({
-    model: 'claude-sonnet-4-6',
+  const completion = await client.chat.completions.create({
+    model: 'llama-3.3-70b-versatile',
     max_tokens: 600,
     messages: [{ role: 'user', content: prompt }],
   })
 
-  const bodyText = msg.content[0].type === 'text' ? msg.content[0].text.trim() : ''
+  const bodyText = completion.choices[0]?.message?.content?.trim() ?? ''
 
   const opener = openerLine(status, city)
   const details = [

@@ -41,19 +41,14 @@ export interface ParsedListing {
   email_received_at: Date
 }
 
-/**
- * Try to match an agent name from arbitrary text against the known agents list.
- * Returns the first full match found.
- */
 function matchAgentInText(text: string, agentNames: string[]): string | null {
   const lower = text.toLowerCase()
-  // Full name match first (most reliable)
   for (const name of agentNames) {
     if (lower.includes(name.toLowerCase())) return name
   }
   // First-name possessive: "Ari's Listing", "James's Closed Deals"
-  const possessive = text.match(/([A-Z][a-z]{1,20})'s/g) || []
-  for (const p of possessive) {
+  const possessiveMatches = text.match(/([A-Z][a-z]{1,20})'s/g) || []
+  for (const p of possessiveMatches) {
     const first = p.replace(/'s$/, '').toLowerCase()
     const found = agentNames.find(n => n.toLowerCase().startsWith(first + ' '))
     if (found) return found
@@ -61,59 +56,59 @@ function matchAgentInText(text: string, agentNames: string[]): string | null {
   return null
 }
 
-/**
- * Fetch the Flexmls listing page and extract:
- *  - Agent name (matched against known agents)
- *  - High-res photo URL
- *  - Full address, city, state, zip (as fallback if email parsing missed them)
- */
-async function enrichFromListingPage(
-  viewListingUrl: string,
-  agentNames: string[],
-): Promise<{ agent_name: string | null; photo_url: string | null }> {
+async function fetchHiResPhotoFromListingPage(url: string): Promise<string | null> {
   try {
-    const res = await fetch(viewListingUrl, {
+    const res = await fetch(url, {
       signal: AbortSignal.timeout(10000),
       headers: { 'User-Agent': 'Mozilla/5.0' },
     })
-    if (!res.ok) return { agent_name: null, photo_url: null }
-
+    if (!res.ok) return null
     const html = await res.text()
     const $ = cheerio.load(html)
-    const pageText = $('body').text()
 
-    // Agent name from page text
-    const agent_name = matchAgentInText(pageText, agentNames)
-
-    // Best photo: prefer large CDN photos, fall back to any img
     let photo_url: string | null = null
-    const imgSrcs: string[] = []
     $('img').each((_, el) => {
+      if (photo_url) return
       const src = $(el).attr('src') || $(el).attr('data-src') || ''
-      if (src) imgSrcs.push(src)
+      if (src.includes('cdn.photos.sparkplatform.com')) photo_url = src
     })
-    // Prefer sparkplatform CDN or large images
-    photo_url =
-      imgSrcs.find(s => s.includes('cdn.photos.sparkplatform.com') && /large|hd|full|\d{3,}x\d{3,}/i.test(s)) ||
-      imgSrcs.find(s => s.includes('cdn.photos.sparkplatform.com')) ||
-      imgSrcs.find(s => /\.(jpg|jpeg|png|webp)/i.test(s) && !s.includes('logo') && !s.includes('icon')) ||
-      null
-
-    return { agent_name, photo_url }
+    if (!photo_url) {
+      $('img').each((_, el) => {
+        if (photo_url) return
+        const src = $(el).attr('src') || ''
+        if (/\.(jpg|jpeg|png|webp)/i.test(src) && !src.includes('logo') && !src.includes('icon')) {
+          photo_url = src
+        }
+      })
+    }
+    return photo_url
   } catch {
-    return { agent_name: null, photo_url: null }
+    return null
   }
 }
 
 /**
- * Parse all listing blocks out of a single email's HTML.
+ * Validate an MLS number: must be 5+ digits and not all zeros.
+ */
+function isValidMls(mls: string | null): mls is string {
+  if (!mls) return false
+  if (mls.length < 5) return false
+  if (/^0+$/.test(mls)) return false
+  return true
+}
+
+/**
+ * Parse listing blocks from a Flexmls email.
  *
- * Flexmls emails contain one or more listing blocks, each with:
- *   [$PRICE]
- *   [Address as hyperlink]
- *   [City, AZ ZIP • #MLSNUMBER]
- *   [Status text]
- *   [VIEW LISTING button/link]
+ * The email format per listing block is:
+ *   $PRICE
+ *   ADDRESS (as link)
+ *   City, AZ ZIP • #MLSNUMBER
+ *   STATUS        ← word immediately before "View Listing"
+ *   [VIEW LISTING button]
+ *
+ * We anchor status extraction to the "View Listing" position so we don't
+ * accidentally pick up status words from checklists, footers, or other listings.
  */
 async function parseEmail(
   html: string,
@@ -124,184 +119,151 @@ async function parseEmail(
   const $ = cheerio.load(html)
   const results: ParsedListing[] = []
 
-  // Collect all "VIEW LISTING" links — one per listing block
-  const viewLinks: string[] = []
+  // Find every "View Listing" link — one per listing block
+  const viewListingLinks: { url: string; el: cheerio.Element }[] = []
   $('a').each((_, el) => {
-    const href = $(el).attr('href') || ''
     const text = $(el).text().trim().toLowerCase()
-    if ((text.includes('view listing') || text.includes('view') ) && href.startsWith('http')) {
-      if (!viewLinks.includes(href)) viewLinks.push(href)
+    const href = $(el).attr('href') || ''
+    if (text.includes('view listing') && href.startsWith('http')) {
+      viewListingLinks.push({ url: href, el })
     }
   })
 
-  // Also find listing blocks by price pattern
-  // Walk through all text-containing elements to find price markers
-  const listingBlocks: Array<{
-    price: number
-    address: string | null
-    city: string | null
-    state: string | null
-    zip: string | null
-    mls_number: string | null
-    status: ListingStatus | null
-    photo_url: string | null
-    view_url: string | null
-  }> = []
+  // If no "View Listing" links found, nothing actionable in this email
+  if (viewListingLinks.length === 0) {
+    console.log(`[gmail] No VIEW LISTING links in: "${subject}" — skipping`)
+    return []
+  }
 
-  // Find all elements that contain only a price (leaf nodes)
-  $('*').each((_, el) => {
-    const $el = $(el)
-    if ($el.children('*').length > 2) return // skip containers
-    const text = $el.text().trim()
-    const priceMatch = text.match(/^\$\s?([\d,]+)$/)
-    if (!priceMatch) return
+  for (const { url: viewUrl, el: viewEl } of viewListingLinks) {
+    // Walk up from the "View Listing" link to find the listing card container.
+    // We go up until we find a container that also contains a price ($NNN,NNN).
+    let container = $(viewEl).parent()
+    for (let i = 0; i < 8; i++) {
+      if (/\$[\d,]+/.test(container.text())) break
+      const parent = container.parent()
+      if (!parent.length) break
+      container = parent
+    }
 
+    const blockText = container.text().replace(/\s+/g, ' ').trim()
+
+    // ── Price ──────────────────────────────────────────────────────────────
+    const priceMatch = blockText.match(/\$\s?([\d,]+)/)
+    if (!priceMatch) {
+      console.log(`[gmail] No price in block for view url: ${viewUrl}`)
+      continue
+    }
     const price = parseInt(priceMatch[1].replace(/,/g, ''), 10)
-    if (price < 50000 || price > 50000000) return
+    if (price < 50000 || price > 50000000) continue
 
-    // Find the surrounding block (go up 2–4 levels to get the listing card)
-    const block = $el.closest('td, div, table').first()
-    const blockHtml = block.html() || ''
-    const blockText = block.text()
+    // ── Status — anchored to text IMMEDIATELY before "View Listing" ────────
+    // Take only the text that comes before "view listing" in the block
+    const viewIdx = blockText.toLowerCase().indexOf('view listing')
+    const beforeView = viewIdx > 0 ? blockText.slice(0, viewIdx).trim() : blockText
 
-    // Address: first <a> in block whose text looks like a street address
-    let address: string | null = null
-    let viewUrl: string | null = null
-    block.find('a').each((_, a) => {
-      const href = $(a).attr('href') || ''
-      const linkText = $(a).text().trim()
-      if (/^\d+\s+\S/.test(linkText) && !address) {
-        address = linkText
-      }
-      if (($(a).text().toLowerCase().includes('view') || href.includes('flexmls') || href.includes('flexmls'))) {
-        if (href.startsWith('http') && !viewUrl) viewUrl = href
-      }
-    })
-
-    // City / State / ZIP / MLS line
-    // Formats: "Scottsdale, AZ 85251 • #7042534"
-    //          "234, Scottsdale, AZ 85251 • #7042534" (unit number prefix)
-    let city: string | null = null, state: string | null = null
-    let zip: string | null = null, mls_number: string | null = null
-
-    const cityLine = blockText.match(
-      /(?:\d+,\s*)?([A-Za-z ]+),\s*([A-Z]{2})\s+(\d{5})\s*[•·\-]\s*#?(\d{5,})/
-    )
-    if (cityLine) {
-      city = cityLine[1].trim()
-      state = cityLine[2]
-      zip = cityLine[3]
-      mls_number = cityLine[4]
-    }
-
-    // MLS fallback
-    if (!mls_number) {
-      const mlsFallback = blockText.match(/#(\d{5,})/) || blockHtml.match(/#(\d{5,})/)
-      if (mlsFallback) mls_number = mlsFallback[1]
-    }
-
-    // Status
     let status: ListingStatus | null = null
+    // Check each valid status against the end of beforeView (most specific anchor)
     for (const s of VALID_STATUSES) {
-      if (new RegExp(s, 'i').test(blockText)) {
-        if (!status || STATUS_PRIORITY[s] > STATUS_PRIORITY[status]) status = s
+      const re = new RegExp(s.replace(' ', '\\s+') + '\\s*$', 'i')
+      if (re.test(beforeView)) {
+        status = s
+        break
       }
     }
-
-    // Photo in block
-    let photo_url: string | null = null
-    block.find('img').each((_, img) => {
-      const src = $(img).attr('src')
-      if (src && !photo_url) photo_url = src
-    })
-
-    if (status) {
-      listingBlocks.push({ price, address, city, state, zip, mls_number, status, photo_url, view_url: viewUrl })
-    }
-  })
-
-  // If no blocks found via price elements, try a fallback: parse whole email text
-  if (listingBlocks.length === 0) {
-    const fullText = $('body').text()
-    const priceMatches = Array.from(fullText.matchAll(/\$([\d,]+)/g))
-    for (const pm of priceMatches) {
-      const price = parseInt(pm[1].replace(/,/g, ''), 10)
-      if (price < 50000 || price > 50000000) continue
-
-      const cityLine = fullText.match(/(?:\d+,\s*)?([A-Za-z ]+),\s*([A-Z]{2})\s+(\d{5})\s*[•·\-]\s*#?(\d{5,})/)
-      const mlsFallback = fullText.match(/#(\d{5,})/)
-      let status: ListingStatus | null = null
+    // Fallback: check if the status appears anywhere in beforeView but not in afterView
+    if (!status) {
       for (const s of VALID_STATUSES) {
-        if (new RegExp(s, 'i').test(fullText)) {
+        if (new RegExp(s, 'i').test(beforeView)) {
           if (!status || STATUS_PRIORITY[s] > STATUS_PRIORITY[status]) status = s
         }
       }
-      if (status) {
-        listingBlocks.push({
-          price,
-          address: null,
-          city: cityLine?.[1]?.trim() || null,
-          state: cityLine?.[2] || null,
-          zip: cityLine?.[3] || null,
-          mls_number: cityLine?.[4] || mlsFallback?.[1] || null,
-          status,
-          photo_url: null,
-          view_url: viewLinks[0] || null,
-        })
-        break // one listing per fallback parse
+    }
+
+    if (!status) {
+      console.log(`[gmail] Could not determine status for block (beforeView tail: "${beforeView.slice(-60)}")`)
+      continue
+    }
+
+    // ── MLS number ─────────────────────────────────────────────────────────
+    // Format: "• #7011076" or "#7042534"
+    const mlsMatch = beforeView.match(/[•·]\s*#?(\d{5,})/) || beforeView.match(/#(\d{5,})/)
+    const mls_number = mlsMatch ? mlsMatch[1] : null
+
+    if (!isValidMls(mls_number)) {
+      console.log(`[gmail] Invalid/missing MLS "${mls_number}" — skipping block`)
+      continue
+    }
+
+    // ── Address ────────────────────────────────────────────────────────────
+    // Address is a hyperlink inside the container
+    let address: string | null = null
+    container.find('a').each((_, a) => {
+      if (address) return
+      const linkText = $(a).text().trim()
+      // Street address: starts with a number followed by a word
+      if (/^\d+\s+\S/.test(linkText) && linkText.length > 5 && linkText.length < 100) {
+        address = linkText
       }
+    })
+
+    if (!address) {
+      // Try extracting from text: number + street name before the city line
+      const addrMatch = beforeView.match(/(\d+\s+[A-Za-z0-9 .#'-]+?)\s+(?:[A-Za-z ]+,\s*[A-Z]{2}\s+\d{5})/)
+      if (addrMatch) address = addrMatch[1].trim()
     }
-  }
 
-  // For each block, enrich from the listing page
-  // Try to match agent from subject + full email body first
-  const emailBodyText = $('body').text()
-  const agentFromEmail = matchAgentInText(subject + ' ' + emailBodyText, agentNames)
-
-  for (let i = 0; i < listingBlocks.length; i++) {
-    const block = listingBlocks[i]
-    // Use the view_url for this block, or fall back to viewLinks[i]
-    const viewUrl = block.view_url || viewLinks[i] || null
-
-    let agent_name = agentFromEmail
-    let photo_url = block.photo_url
-
-    if (viewUrl) {
-      const enriched = await enrichFromListingPage(viewUrl, agentNames)
-      if (enriched.agent_name) agent_name = enriched.agent_name
-      if (enriched.photo_url) photo_url = enriched.photo_url
+    if (!address) {
+      console.log(`[gmail] No address found for MLS #${mls_number} — skipping`)
+      continue
     }
+
+    // ── City / State / ZIP ─────────────────────────────────────────────────
+    // Slice beforeView to only the text AFTER the address to avoid the street
+    // name matching the city pattern (e.g. "W ADAMANDA Drive Phoenix, AZ 85XXX")
+    const afterAddress = address
+      ? beforeView.slice(beforeView.indexOf(address) + address.length)
+      : beforeView
+    const cityMatch = afterAddress.match(/([A-Za-z][A-Za-z ]{1,25}),\s*([A-Z]{2})\s+(\d{5})/)
+    const city = cityMatch?.[1]?.trim() || null
+    const state = cityMatch?.[2] || null
+    const zip = cityMatch?.[3] || null
+
+    // ── Photo ──────────────────────────────────────────────────────────────
+    let photo_url: string | null = null
+    container.find('img').each((_, img) => {
+      if (photo_url) return
+      const src = $(img).attr('src') || ''
+      if (src && !src.includes('logo') && !src.includes('icon')) photo_url = src
+    })
+
+    // ── Agent — from email subject possessive ("James's Closed Deals") ───────
+    // We deliberately do NOT use the listing page for agent matching because
+    // the team lead (Ari Jakobov) appears on every FlexMLS page and would
+    // override the correct agent name derived from the email subject.
+    const agent_name: string | null = matchAgentInText(subject, agentNames)
+
+    // ── Hi-res photo — from listing page ──────────────────────────────────
+    const hiResPhoto: string | null = (await fetchHiResPhotoFromListingPage(viewUrl)) ?? photo_url
 
     results.push({
-      mls_number: block.mls_number,
-      status: block.status,
-      price: block.price,
-      address: block.address,
-      city: block.city,
-      state: block.state,
-      zip: block.zip,
+      mls_number,
+      status,
+      price,
+      address,
+      city,
+      state,
+      zip,
       agent_name,
-      photo_url,
+      photo_url: hiResPhoto,
       email_received_at: receivedAt,
     })
   }
 
-  // Deduplicate by MLS within this email
-  const byMls = new Map<string, ParsedListing>()
-  for (const r of results) {
-    const key = r.mls_number || `addr-${r.address}-${r.price}`
-    const existing = byMls.get(key)
-    if (!existing) {
-      byMls.set(key, r)
-    } else if (r.status && existing.status && STATUS_PRIORITY[r.status] > STATUS_PRIORITY[existing.status]) {
-      byMls.set(key, r)
-    }
-  }
-
-  return Array.from(byMls.values())
+  return results
 }
 
-export async function scanGmailInbox(agentNames: string[]): Promise<ParsedListing[]> {
+export async function scanGmailInbox(agentNames: string[]): Promise<{ listings: ParsedListing[]; skipped: number }> {
   const gmail = getGmailClient()
 
   const listRes = await gmail.users.messages.list({
@@ -311,7 +273,10 @@ export async function scanGmailInbox(agentNames: string[]): Promise<ParsedListin
   })
 
   const messages = listRes.data.messages || []
+  console.log(`[gmail] Found ${messages.length} emails to process`)
+
   const allListings: ParsedListing[] = []
+  let skipped = 0
 
   for (const msg of messages) {
     try {
@@ -327,14 +292,17 @@ export async function scanGmailInbox(agentNames: string[]): Promise<ParsedListin
       const receivedAt = new Date(dateStr)
 
       const html = extractHtmlBody(payload)
-      if (!html) continue
+      if (!html) { skipped++; continue }
 
       const listings = await parseEmail(html, subject, receivedAt, agentNames)
+      if (listings.length === 0) skipped++
       allListings.push(...listings)
     } catch (err) {
-      console.error(`Failed to parse message ${msg.id}:`, err)
+      console.error(`[gmail] Failed to parse message ${msg.id}:`, err)
+      skipped++
     }
   }
 
-  return allListings
+  console.log(`[gmail] Parsed ${allListings.length} listing instances from ${messages.length} emails (${skipped} emails yielded no listings)`)
+  return { listings: allListings, skipped }
 }

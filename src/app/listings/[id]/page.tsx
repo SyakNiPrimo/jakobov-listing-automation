@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { Listing, ListingPhoto, PHOTO_SLOTS, PHOTO_SLOT_LABELS, PhotoSlot } from '@/types'
 import Image from 'next/image'
+import JSZip from 'jszip'
 
 const STATUS_COLORS: Record<string, string> = {
   'New Listing': '#C9A96E',
@@ -97,6 +98,34 @@ export default function ListingDetail() {
   }
 
   const photoBySlot = (slot: PhotoSlot) => photos.find(p => p.slot === slot)
+
+  const [downloadingAll, setDownloadingAll] = useState(false)
+  const [dragOverSlot, setDragOverSlot] = useState<PhotoSlot | null>(null)
+
+  const handleDownloadAll = async () => {
+    const processed = photos.filter(p => p.processed_url)
+    if (processed.length === 0) { showToast('No processed photos to download', false); return }
+    setDownloadingAll(true)
+    try {
+      const zip = new JSZip()
+      await Promise.all(processed.map(async p => {
+        const res = await fetch(p.processed_url!)
+        const blob = await res.blob()
+        const label = PHOTO_SLOT_LABELS[p.slot as PhotoSlot] ?? p.slot
+        zip.file(`${label.toLowerCase().replace(/\s+/g, '-')}.jpg`, blob)
+      }))
+      const content = await zip.generateAsync({ type: 'blob' })
+      const url = URL.createObjectURL(content)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${listing?.address ?? 'listing'}-photos.zip`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      showToast('Download failed', false)
+    }
+    setDownloadingAll(false)
+  }
 
   if (!listing) {
     return <div className="py-20 text-center" style={{ color: 'var(--gray)' }}>Loading…</div>
@@ -205,7 +234,19 @@ export default function ListingDetail() {
 
       {/* Photo Slots */}
       <div className="space-y-4">
-        <h2 className="font-headline text-xl" style={{ color: 'var(--gold)' }}>Listing Photos</h2>
+        <div className="flex items-center justify-between">
+          <h2 className="font-headline text-xl" style={{ color: 'var(--gold)' }}>Listing Photos</h2>
+          {photos.some(p => p.processed_url) && (
+            <button
+              onClick={handleDownloadAll}
+              disabled={downloadingAll}
+              className="px-4 py-2 rounded text-sm font-medium disabled:opacity-50"
+              style={{ background: 'rgba(201,169,110,0.2)', color: 'var(--gold)', border: '1px solid rgba(201,169,110,0.3)' }}
+            >
+              {downloadingAll ? 'Zipping…' : '⬇ Download All'}
+            </button>
+          )}
+        </div>
         <p className="text-sm" style={{ color: 'var(--gray)' }}>
           Upload a source photo for each slot. Each photo will be processed with a blur-fill treatment for Instagram.
         </p>
@@ -213,45 +254,90 @@ export default function ListingDetail() {
           {PHOTO_SLOTS.map(slot => {
             const photo = photoBySlot(slot)
             const isUploading = uploadingSlot === slot
+            const isDragOver = dragOverSlot === slot
+
+            const handleDrop = (e: React.DragEvent) => {
+              e.preventDefault()
+              setDragOverSlot(null)
+              if (isUploading) return
+              const file = e.dataTransfer.files?.[0]
+              if (file && file.type.startsWith('image/')) handlePhotoUpload(slot, file)
+            }
+
             return (
-              <div key={slot} className="rounded-lg overflow-hidden" style={{ border: '1px solid rgba(201,169,110,0.2)', background: 'rgba(28,28,46,0.6)' }}>
+              <div
+                key={slot}
+                className="rounded-lg overflow-hidden transition-all"
+                style={{
+                  border: isDragOver
+                    ? '2px solid var(--gold)'
+                    : '1px solid rgba(201,169,110,0.2)',
+                  background: isDragOver
+                    ? 'rgba(201,169,110,0.08)'
+                    : 'rgba(28,28,46,0.6)',
+                }}
+                onDragOver={e => { e.preventDefault(); setDragOverSlot(slot) }}
+                onDragEnter={e => { e.preventDefault(); setDragOverSlot(slot) }}
+                onDragLeave={() => setDragOverSlot(null)}
+                onDrop={handleDrop}
+              >
                 <div className="px-3 py-2 text-xs font-medium uppercase tracking-wider" style={{ color: 'var(--gold)', borderBottom: '1px solid rgba(201,169,110,0.15)' }}>
                   {PHOTO_SLOT_LABELS[slot]}
                 </div>
-                {photo?.processed_url ? (
+
+                {isUploading ? (
+                  <div className="p-8 text-center" style={{ color: 'var(--gray)' }}>
+                    <div className="text-2xl mb-2 animate-pulse">⏳</div>
+                    <div className="text-xs">Processing…</div>
+                  </div>
+                ) : photo?.processed_url ? (
                   <div className="space-y-2 p-2">
-                    <div className="text-xs" style={{ color: 'var(--gray)' }}>Processed</div>
                     <Image src={photo.processed_url} alt={PHOTO_SLOT_LABELS[slot]} width={300} height={300} className="w-full rounded object-cover aspect-square" />
-                    {photo.original_url && (
-                      <a href={photo.original_url} target="_blank" rel="noopener noreferrer" className="text-xs underline" style={{ color: 'var(--gray)' }}>View original</a>
-                    )}
+                    <div className="flex gap-2">
+                      <a href={photo.processed_url} download={`${slot}-processed.jpg`} target="_blank" rel="noopener noreferrer" className="text-xs underline" style={{ color: 'var(--gold)' }}>
+                        ⬇ Download
+                      </a>
+                      {photo.original_url && (
+                        <a href={photo.original_url} target="_blank" rel="noopener noreferrer" className="text-xs underline" style={{ color: 'var(--gray)' }}>Original</a>
+                      )}
+                    </div>
                   </div>
                 ) : (
-                  <div className="p-4 text-center" style={{ color: 'var(--gray)' }}>
-                    <div className="text-2xl mb-2">📷</div>
-                    <div className="text-xs mb-3">No photo yet</div>
-                  </div>
-                )}
-                <div className="p-2">
-                  <label className="block w-full cursor-pointer">
-                    <span
-                      className="block text-center px-3 py-1.5 rounded text-xs font-medium w-full"
-                      style={{ background: isUploading ? 'rgba(201,169,110,0.1)' : 'rgba(201,169,110,0.2)', color: 'var(--gold)', border: '1px solid rgba(201,169,110,0.3)' }}
-                    >
-                      {isUploading ? 'Processing…' : photo ? 'Replace' : 'Upload Photo'}
-                    </span>
+                  <label className="flex flex-col items-center justify-center p-6 cursor-pointer" style={{ minHeight: '120px', color: 'var(--gray)' }}>
+                    <div className="text-3xl mb-2">{isDragOver ? '📂' : '📷'}</div>
+                    <div className="text-xs text-center leading-relaxed">
+                      {isDragOver ? 'Drop to upload' : 'Drag photo here\nor click to browse'}
+                    </div>
                     <input
                       type="file"
                       accept="image/*"
                       className="hidden"
-                      disabled={isUploading}
                       onChange={e => {
                         const file = e.target.files?.[0]
                         if (file) handlePhotoUpload(slot, file)
                       }}
                     />
                   </label>
-                </div>
+                )}
+
+                {photo?.processed_url && !isUploading && (
+                  <div className="px-2 pb-2">
+                    <label className="block w-full cursor-pointer">
+                      <span className="block text-center px-3 py-1.5 rounded text-xs font-medium w-full" style={{ background: 'rgba(201,169,110,0.15)', color: 'var(--gold)', border: '1px solid rgba(201,169,110,0.25)' }}>
+                        Replace
+                      </span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={e => {
+                          const file = e.target.files?.[0]
+                          if (file) handlePhotoUpload(slot, file)
+                        }}
+                      />
+                    </label>
+                  </div>
+                )}
               </div>
             )
           })}
